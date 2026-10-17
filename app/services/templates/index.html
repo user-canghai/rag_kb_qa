@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <title>RAG智能问答系统</title>
+
+        <style>
+            *{margin:0;padding:0;box-sizing:border-box;font-family:system-ui}
+            body{background:#f7f8fa;color:#333}
+            .header{
+                padding:14px 20px;
+                background:#e6f7e6;
+                border-bottom:1px solid #c7e9c7;
+                text-align:center;
+                font-size:18px;
+                font-weight:500;
+            }
+            .container{display:flex;gap:16px;padding:16px;flex-wrap:wrap}
+            .left{flex:2;min-width:500px}
+            .right{flex:1;min-width:350px}
+            .panel{background:#fff;border-radius:12px;padding:16px;border:1px solid #eee;margin-bottom:16px}
+            .chat-body{min-height:320px;max-height:350px;overflow-y:auto;padding:12px;gap:12px;display:flex;flex-direction:column}
+            .msg{max-width:85%;padding:10px 14px;border-radius:12px}
+            .msg-user{align-self:flex-end;background:#1677ff;color:white}
+            .msg-bot{align-self:flex-start;background:#f1f1f1;white-space:pre-wrap}
+            .input-bar{display:flex;gap:8px;margin-top:10px}
+            .input-bar input{flex:1;padding:12px;border:1px solid #eee;border-radius:8px}
+            .input-bar button{padding:12px 16px;background:#1677ff;color:white;border:none;border-radius:8px;cursor:pointer}
+            .file-list{height:120px;overflow-y:auto;border:1px solid #eee;border-radius:8px;padding:8px;margin:10px 0}
+            .retrieval-body{min-height:380px;max-height:420px;overflow-y:auto;padding:12px;gap:12px;display:flex;flex-direction:column}
+            .retrieval-item{padding:10px;border-left:3px solid #1677ff;background:#f7f8fa;margin-bottom:8px;border-radius:0 6px 6px 0}
+            .progress-bar{height:8px;background:#eee;border-radius:4px;margin:8px 0;overflow:hidden}
+            .progress-fill{height:100%;background:#1677ff;width:0%;transition:width 0.3s}
+            .ragas-box{margin-top:12px;padding:12px;background:#f8f9fa;border-radius:8px}
+            .ragas-box p{margin:6px 0;font-size:14px}
+        </style>
+    </head>
+<body>
+
+<div class="header"><h3>RAG 智能问答系统</h3></div>
+
+<div class="container">
+    <div class="left">
+        <div class="panel">
+            <div class="chat-body" id="chatBody">
+                {% for item in history %}
+                <div class="msg msg-user">{{item.user}}</div>
+                <div class="msg msg-bot">{{item.bot}}</div>
+                {% endfor %}
+            </div>
+            <form class="input-bar" id="chatForm">
+                <input type="text" id="query" placeholder="输入问题..." required>
+                <select id="mode">
+                    <option value="auto" selected>自动模式</option>
+                    <option value="rag">RAG模式</option>
+                    <option value="no_rag">普通模式</option>
+
+                </select>
+                <button type="submit">发送</button>
+                <button type="button" onclick="location.href='/clear_history'" style="background:#666">清空对话</button>
+            </form>
+        </div>
+
+        <div class="panel">
+            <form action="/delete_selected" method="post">
+                <div class="file-list">
+                    {% for f in files %}
+                    <div><input type="checkbox" name="selected_files" value="{{f}}"> {{f}}</div>
+                    {% else %}
+                    <div style="color:#999">暂无文件</div>
+                    {% endfor %}
+                </div>
+                <button onclick="return confirm('确定删除选中文档？对应索引会一并删除。')" style="background:#ff4d4f;padding:8px 12px;border:none;border-radius:6px;color:white;cursor:pointer">删除选中</button>
+                <button formaction="/build_selected_index" style="background:#00b42a;padding:8px 12px;border:none;border-radius:6px;color:white;cursor:pointer">构建索引</button>
+                <button type="button" onclick="if(confirm('确定清空全部？文档与索引都会被删除。')) location.href='/clear_all'" style="background:#faad14;padding:8px 12px;border:none;border-radius:6px;color:white;cursor:pointer">清空全部</button>
+            </form>
+            <form action="/upload" method="post" enctype="multipart/form-data" style="margin-top:10px">
+                <input type="file" name="file" multiple>
+                <button style="background:#00b42a;padding:8px 12px;border:none;border-radius:6px;color:white;cursor:pointer">上传文档</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="right">
+        <div class="panel">
+            <h4>📄 检索内容</h4>
+            <div class="retrieval-body" id="retrievalBody">暂无内容</div>
+        </div>
+
+        <div class="panel">
+            <h4>📊 RAGAS 评估（3维度）</h4>
+            <form id="evalForm" enctype="multipart/form-data">
+                <input type="file" name="eval_file" accept=".json" required>
+                <button type="submit">开始评估</button>
+            </form>
+
+            <div style="margin-top:10px">
+                <div id="status">状态：等待评估</div>
+                <div class="progress-bar"><div id="progFill" class="progress-fill"></div></div>
+                <div id="progText">进度：0 / 0</div>
+            </div>
+
+            <div id="evalResult"></div>
+
+            {% if ragas %}
+            <div class="ragas-box">
+                {% for k,v in ragas.items() %}
+                <p><strong>{{k}}：</strong> {{v}}</p>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+<script>
+    let evalInterval = null;
+
+    function syncEvalProgress() {
+        fetch("/eval_progress")
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById("status").innerText = "状态：" + data.status;
+
+                document.getElementById("progFill").style.width = data.progress + "%";
+                document.getElementById("progText").innerText = `进度：${data.current} / ${data.total}`;
+
+                const resDiv = document.getElementById("evalResult");
+                if (data.result && Object.keys(data.result).length > 0) {
+                    let html = `<div class="ragas-box">`;
+                    for (let k in data.result) {
+                        html += `<p><strong>${k}</strong>：${data.result[k]}</p>`;
+                    }
+                    html += `</div>`;
+                    resDiv.innerHTML = html;
+                }
+
+                if (data.status === "评估完成" || data.status === "评估失败") {
+                    clearInterval(evalInterval);
+                    evalInterval = null;
+                }
+            });
+    }
+
+    document.getElementById("evalForm").addEventListener("submit", function (e) {
+        e.preventDefault();
+
+        document.getElementById("evalResult").innerHTML = "";
+
+        if (evalInterval) clearInterval(evalInterval);
+        evalInterval = setInterval(syncEvalProgress, 600);
+        syncEvalProgress();
+
+        const formData = new FormData(this);
+        fetch("/upload_eval", {
+            method: "POST",
+            body: formData
+        });
+    });
+
+    document.getElementById("chatForm").addEventListener("submit", async e => {
+    e.preventDefault()
+    const query = document.getElementById("query").value.trim()
+    const mode = document.getElementById("mode").value
+    if (!query) return
+    let lastReflectDiv = null;
+    const chat = document.getElementById("chatBody")
+    const qDiv = document.createElement("div")
+    qDiv.className = "msg msg-user"
+    qDiv.textContent = query
+    chat.appendChild(qDiv)
+
+    const ansDiv = document.createElement("div")
+    ansDiv.className = "msg msg-bot"
+    chat.appendChild(ansDiv)
+
+    document.getElementById("query").value = ""
+    chat.scrollTop = chat.scrollHeight
+
+    const res = await fetch("/stream_chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, mode })
+    })
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ""
+
+    while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buf += decoder.decode(value)
+        const lines = buf.split("\n")
+        buf = lines.pop() || ""
+
+        for (const line of lines) {
+            const l = line.trim()
+            if (!l) continue
+            try {
+                const data = JSON.parse(l)
+                if (data.content) {
+                    if (data.type === "reflection") {
+                        if (!lastReflectDiv) {
+                            lastReflectDiv = document.createElement("div");
+                            lastReflectDiv.style.marginTop = "6px";
+                            lastReflectDiv.style.fontSize = "12px";
+                            lastReflectDiv.style.color = "#888";
+                            ansDiv.appendChild(lastReflectDiv);
+                        }
+                        lastReflectDiv.textContent = data.content;
+                    }
+                    else {
+                            ansDiv.textContent += data.content;
+                    }
+
+                    chat.scrollTop = chat.scrollHeight
+                }
+                if (data.retrieval) {
+                    const html = data.retrieval.map(x => `
+                        <div class="retrieval-item">
+                            ${x.content.slice(0,300)}...
+                            <br>
+                            <small style="color: #6BA9E2; font-style: italic;">📌 来源：${x.source}</small>
+                        </div>
+                    `).join("")
+                    document.getElementById("retrievalBody").innerHTML = html
+                }
+            } catch (e) {}
+        }
+    }
+});
+
+    </script>
+    </body>
+</html>
